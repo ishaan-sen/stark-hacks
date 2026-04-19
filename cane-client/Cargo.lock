@@ -352,6 +352,7 @@ dependencies = [
  "dotenvy",
  "elevenlabs-sdk",
  "futures-util",
+ "image",
  "openai-tools",
  "serde",
  "serde_json",

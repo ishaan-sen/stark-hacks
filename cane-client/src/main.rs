@@ -45,12 +45,70 @@ mod kp {
 }
 
 mod prompts {
-    pub const DESCRIBE: &str = r#"I am blind. This camera feed shows my point of view. Briefly describe what is immediately in front of me, in the center of the view. Focus on what is most important and pertinent. No need for complete sentences, keep it sharp and to-the-point."#;
-    pub const ALERT: &str = r#"I am blind. This camera feed shows my point of view. If there is any immediate danger or obstacle, or something I should keep in mind or know about for safety purposes, please let me know. In addition to physical barriers, this could include, for instance, wet floor signs or road crossings. Remember to be brief and direct; no need for full sentences, just get the point across as efficiently as possible. If you provide such an alert, make sure to begin your message with "[alert]". If there is nothing worth noting, respond with "[none]" and nothing else."#;
+    // pub const DESCRIBE: &str = r#"I am blind. This camera feed shows my point of view. Briefly tell me what is immediately in front of me, in the center of the view. Focus on what is most important and pertinent. No need for complete sentences, keep it sharp and to-the-point."#;
+    // pub const ALERT: &str = r#"I am blind. This camera feed shows my point of view. If there is any immediate danger or obstacle, or something I should keep in mind or know about for safety purposes, please let me know. In addition to physical barriers, this could include, for instance, wet floor signs or road crossings. Remember to be brief and direct; no need for full sentences, just get the point across as efficiently as possible. If you provide such an alert, make sure to begin your message with "[alert]". If there is nothing worth noting, respond with "[none]" and nothing else."#;
+
+    pub const DESCRIBE_SYSTEM: &str = r#"\
+You are a mobility-assistance vision model for a blind or visually impaired user.
+
+The image is from the user’s first-person perspective. Your job is to identify what is immediately in front of the user, especially within the next few steps and in the center of their forward path.
+
+Prioritize:
+1. the nearest object, surface, opening, person, step, door, chair, wall, curb, vehicle, or other thing directly ahead
+2. anything blocking the user’s immediate forward movement
+3. distance only when it is useful and can be estimated coarsely
+
+Do not describe the whole scene. Ignore background details, decor, text, colors, and distant objects unless they matter for immediate navigation.
+
+Output must be extremely brief, suitable for text-to-speech.
+Use a short noun phrase, not a full sentence.
+Examples:
+- "door ahead"
+- "wall immediately ahead"
+- "chair in front"
+- "person a few feet ahead"
+- "stairs down ahead"
+- "clear path"\
+"#;
+    pub const DESCRIBE_USER: &str = r#"What is immediately in front of me? Report only the most relevant immediate forward information for navigation."#;
+
+    pub const ALERT_SYSTEM: &str = r#"\
+You are a mobility-safety vision model for a blind or visually impaired user.
+
+The image is from the user’s first-person perspective. Your job is not to describe the scene. Your job is only to detect immediate obstacles or hazards important enough to warn the user about right now.
+
+Warn only for things that are likely to matter within the next few steps or seconds, such as:
+- obstacles blocking the forward path
+- stairs, drop-offs, curbs, ledges
+- glass doors or walls that are directly ahead
+- poles, barriers, low overhangs, protruding objects
+- moving bikes, vehicles, or people on a collision path
+- wet floors, construction hazards, or other immediate dangers
+
+Do not warn about harmless background objects, distant objects, or things off the path.
+If there is no important immediate obstacle or hazard, output exactly:
+none
+
+If there is a warning, output one short phrase only, with the most important issue first.
+Examples:
+- "stairs down ahead"
+- "pole directly ahead"
+- "car approaching from left"
+- "low barrier ahead"
+- "person crossing in front"
+
+Be conservative about speaking. Prefer "none" unless the issue is important enough that a blind pedestrian would want to hear it immediately.\
+"#;
+    pub const ALERT_USER: &str = r#"Check for immediate obstacles or dangers that are important enough to alert me about now."#;
 }
 
 const TMP_DIR: &str = "tmp";
 const CAPTURE_NAME: &str = "cane-capture.jpeg";
+const CAPTURE_RESIZE_NAME: &str = "cane-capture-small.jpeg";
+static CAPTURE_PATH: LazyLock<PathBuf> =
+    LazyLock::new(|| PathBuf::from(TMP_DIR).join(CAPTURE_NAME));
+static CAPTURE_RESIZE_PATH: LazyLock<PathBuf> =
+    LazyLock::new(|| PathBuf::from(TMP_DIR).join(CAPTURE_RESIZE_NAME));
 
 #[cfg(target_os = "macos")]
 const CAPTURE_CMD: &str = "imagesnap";
@@ -80,6 +138,12 @@ async fn sleep_millis(millis: u64) {
 pub async fn main() -> Result<(), Error> {
     dotenvy::dotenv().unwrap();
     fs::create_dir_all(TMP_DIR).await?;
+
+    query_vision(VisionQuery::Describe).await;
+
+    loop {
+        sleep_millis(5000).await;
+    }
 
     let url_arg = std::env::args().nth(1);
     let url = url_arg.as_deref().unwrap_or("ws://cane.local:81");
@@ -230,13 +294,8 @@ enum VisionQuery {
 
 async fn query_vision(query: VisionQuery) {
     // --- Step 1: Capture image to a file ---
-    let capture_path = PathBuf::from(TMP_DIR)
-        .join(CAPTURE_NAME)
-        // This step is necessary because openai_tools requires something implementing `AsRef<str>` instead of `AsRef<OsStr>`. Maybe should be PR'd
-        .to_string_lossy()
-        .to_string();
     let mut capture_cmd = process::Command::new(CAPTURE_CMD);
-    capture_cmd.arg(&capture_path);
+    capture_cmd.arg(&*CAPTURE_PATH);
     capture_cmd
         .spawn()
         .expect("Failed to create image capture command")
@@ -244,21 +303,34 @@ async fn query_vision(query: VisionQuery) {
         .await
         .expect("Failed to capture camera feed");
 
+    downscale_capture().expect("Failed to downscale captured image");
+
+    let capture_path: String = CAPTURE_RESIZE_PATH
+        // This step is necessary because openai_tools requires something implementing `AsRef<str>` instead of `AsRef<OsStr>`. Maybe should be PR'd
+        // .to_string_lossy()
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap();
+
     // --- Step 2: Ask vision model to describe ---
 
-    let prompt = match query {
-        VisionQuery::Describe => prompts::DESCRIBE,
-        VisionQuery::Alert => prompts::ALERT,
+    let (sys_prompt, user_prompt) = match query {
+        VisionQuery::Describe => (prompts::DESCRIBE_SYSTEM, prompts::DESCRIBE_USER),
+        VisionQuery::Alert => (prompts::ALERT_SYSTEM, prompts::ALERT_USER),
     };
 
-    let messages = [Message::from_message_array(
-        Role::User,
-        [
-            Content::from_text(prompt),
-            Content::from_image_file(&capture_path),
-        ]
-        .into(),
-    )];
+    let messages = [
+        Message::from_string(Role::System, sys_prompt),
+        Message::from_message_array(
+            Role::User,
+            [
+                Content::from_text(user_prompt),
+                Content::from_image_file(&capture_path),
+            ]
+            .into(),
+        ),
+    ];
 
     let response = VISION
         .lock()
@@ -280,20 +352,46 @@ async fn query_vision(query: VisionQuery) {
 
     dbg!(output);
 
-    if output == "[none]" {
+    // if output == "[none]" {
+    //     return;
+    // }
+    if output == "none" {
         return;
     }
 
-    let to_say = match query {
-        VisionQuery::Describe => output.trim(),
-        // VisionQuery::Alert if let Some((_, s)) = output.split_once("[alert]") => s.trim(),
-        VisionQuery::Alert => {
-            if let Some((_, s)) = output.split_once("[alert]") {
-                s.trim()
-            } else {
-                return;
-            }
-        } // _ => return,
-    };
+    // let to_say = match query {
+    //     VisionQuery::Describe => output.trim(),
+    //     // VisionQuery::Alert if let Some((_, s)) = output.split_once("[alert]") => s.trim(),
+    //     VisionQuery::Alert => {
+    //         if let Some((_, s)) = output.split_once("[alert]") {
+    //             s.trim()
+    //         } else {
+    //             return;
+    //         }
+    //     } // _ => return,
+    // };
+    let to_say = output.trim();
     speak(to_say);
+}
+
+fn downscale_capture() -> Result<(), Error> {
+    // use image::ImageFormat;
+    // let file = fs::File::open(&*CAPTURE_PATH).await?;
+    // let img = image::load(file, image::ImageFormat::Jpeg);
+
+    let img = image::ImageReader::open(&*CAPTURE_PATH)?
+        .decode()?
+        .into_rgb8();
+    let width = img.width();
+    let height = img.height();
+    let scale_factor = 300.0 / (width as f32).min(height as f32);
+    let nwidth = (width as f32 * scale_factor).round() as u32;
+    let nheight = (height as f32 * scale_factor).round() as u32;
+    let resized =
+        image::imageops::resize(&img, nwidth, nheight, image::imageops::FilterType::Triangle);
+    println!("{}, {}", resized.width(), resized.height());
+
+    resized.save(&*CAPTURE_RESIZE_PATH)?;
+
+    Ok(())
 }
