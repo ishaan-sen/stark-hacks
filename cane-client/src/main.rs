@@ -286,8 +286,14 @@ async fn query_vision(query: VisionQuery) {
 
     let to_say = match query {
         VisionQuery::Describe => output.trim(),
-        VisionQuery::Alert if let Some((_, s)) = output.split_once("[alert]") => s.trim(),
-        _ => return,
+        // VisionQuery::Alert if let Some((_, s)) = output.split_once("[alert]") => s.trim(),
+        VisionQuery::Alert => {
+            if let Some((_, s)) = output.split_once("[alert]") {
+                s.trim()
+            } else {
+                return;
+            }
+        } // _ => return,
     };
     speak(to_say);
 }
