@@ -57,6 +57,11 @@ const CAPTURE_CMD: &str = "imagesnap";
 #[cfg(target_os = "macos")]
 const SPEAK_CMD: &str = "say";
 
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const CAPTURE_CMD: &str = "termux-camera-photo";
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const SPEAK_CMD: &str = "termux-tts-speak";
+
 static VISION: LazyLock<Mutex<ChatCompletion>> = LazyLock::new(|| {
     use std::env::var;
     let key = var("API_KEY").unwrap();
