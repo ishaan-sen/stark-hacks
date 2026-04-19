@@ -139,12 +139,6 @@ pub async fn main() -> Result<(), Error> {
     dotenvy::dotenv().unwrap();
     fs::create_dir_all(TMP_DIR).await?;
 
-    query_vision(VisionQuery::Describe).await;
-
-    loop {
-        sleep_millis(5000).await;
-    }
-
     let url_arg = std::env::args().nth(1);
     let url = url_arg.as_deref().unwrap_or("ws://cane.local:81");
 
